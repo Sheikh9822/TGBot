@@ -6,7 +6,8 @@ from pyrogram.errors import MessageNotModified
 
 def get_eta(rem, speed):
     if speed <= 0: return "Unknown"
-    return time.strftime("%Hh %Mm %Ss", time.gmtime(rem / speed))
+    seconds = rem / speed
+    return time.strftime("%Hh %Mm %Ss", time.gmtime(seconds))
 
 def get_prog_bar(pct):
     p = int(pct / 10)
@@ -14,14 +15,19 @@ def get_prog_bar(pct):
 
 def clean_rename(original_name):
     parsed = PTN.parse(original_name)
-    if parsed.get('season'):
-        return f"[S{parsed.get('season',0):02d}E{parsed.get('episode',0):02d}] {parsed.get('title','File')} [{parsed.get('quality','HD')}].mkv"
+    if parsed.get('season') or parsed.get('episode'):
+        s = f"S{parsed.get('season', 0):02d}"
+        e = f"E{parsed.get('episode', 0):02d}"
+        t = parsed.get('title', 'File')
+        q = parsed.get('quality', 'HD')
+        return f"[{s}{e}] {t} [{q}].mkv"
     return original_name
 
 async def edit_msg(client, chat_id, message_id, text, reply_markup=None):
     try:
         await client.edit_message_text(chat_id, message_id, text, reply_markup=reply_markup)
     except MessageNotModified: pass
+    except Exception as e: print(f"Edit Error: {e}")
 
 def gen_selection_kb(active_tasks, h_hash, page=0, per_page=8):
     task = active_tasks[h_hash]

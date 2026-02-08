@@ -1,7 +1,7 @@
 import os, asyncio, time, json, libtorrent as lt, humanize, PTN, warnings
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from pyrogram.errors import FloodWait
+from pyrogram.errors import FloodWait, MessageNotModified, RPCError
 from googleapiclient.discovery import build
 from google.oauth2 import service_account
 from googleapiclient.http import MediaFileUpload
@@ -13,7 +13,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-DUMP_CHAT_ID = int(os.environ.get("DUMP_CHAT_ID", 0)) # Your Telegram DB Channel ID
+DUMP_CHAT_ID = int(os.environ.get("DUMP_CHAT_ID", 0)) 
 GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "")
 INDEX_URL = os.environ.get("INDEX_URL", "").rstrip('/')
 
@@ -48,13 +48,17 @@ def upload_to_gdrive(path, name):
     while resp is None: _, resp = request.next_chunk()
     return resp.get('webViewLink')
 
-async def tg_prog(current, total, msg, start_time, filename):
+async def tg_prog(current, total, client, chat_id, msg_id, start_time, filename):
     if time.time() - tg_prog.last_up < 5: return
     tg_prog.last_up = time.time()
     pct = (current / total) * 100
     try:
-        await msg.edit(f"📤 **TG Uploading:** `{filename}`\n`{pct:.1f}%` | 🚀 `{humanize.naturalsize(current/(time.time()-start_time))}/s`")
-    except: pass
+        speed = current / (time.time() - start_time) if (time.time() - start_time) > 0 else 0
+        await client.edit_message_text(chat_id, msg_id, 
+            f"📤 **TG Uploading:** `{filename}`\n`{pct:.1f}%` | 🚀 `{humanize.naturalsize(speed)}/s`"
+        )
+    except MessageNotModified: pass
+    except Exception: pass
 tg_prog.last_up = 0
 
 def gen_selection_kb(h_hash, page=0):
@@ -110,32 +114,39 @@ async def callbacks(c, q: CallbackQuery):
     task = active_tasks.get(h_hash)
     if not task: return await q.answer("Task Expired.")
 
-    if action == "tog":
-        idx, p = int(data[2]), int(data[3])
-        if idx in task["selected"]: task["selected"].remove(idx)
-        else: task["selected"].append(idx)
-        await q.message.edit_reply_markup(gen_selection_kb(h_hash, p))
-    elif action == "page": await q.message.edit_reply_markup(gen_selection_kb(h_hash, int(data[2])))
-    elif action == "start":
-        if not task["selected"]: return await q.answer("Select at least one file!")
-        await q.answer("Processing started...")
-        asyncio.create_task(run_download_process(c, h_hash))
-    elif action == "ca":
-        task["cancel"] = True; ses.remove_torrent(task["handle"]); await q.message.edit("❌ Cancelled."); active_tasks.pop(h_hash, None)
+    try:
+        if action == "tog":
+            idx, p = int(data[2]), int(data[3])
+            if idx in task["selected"]: task["selected"].remove(idx)
+            else: task["selected"].append(idx)
+            await q.message.edit_reply_markup(gen_selection_kb(h_hash, p))
+        elif action == "page": await q.message.edit_reply_markup(gen_selection_kb(h_hash, int(data[2])))
+        elif action == "start":
+            if not task["selected"]: return await q.answer("Select at least one file!")
+            await q.answer("Processing started...")
+            asyncio.create_task(run_download_process(c, h_hash))
+        elif action == "ca":
+            task["cancel"] = True; ses.remove_torrent(task["handle"]); await q.message.edit("❌ Cancelled."); active_tasks.pop(h_hash, None)
+    except MessageNotModified: pass
 
 async def run_download_process(c, h_hash):
     task = active_tasks[h_hash]
-    handle = task["handle"]
-    info = handle.get_torrent_info()
+    handle, info = task["handle"], task["handle"].get_torrent_info()
     storage = info.files()
     
+    # FIX: Warm-up the channel so Pyrogram recognizes the ID
+    try:
+        await c.get_chat(DUMP_CHAT_ID)
+    except Exception as e:
+        print(f"Error accessing Dump Channel: {e}")
+        return await c.send_message(task["chat_id"], f"❌ Bot cannot access Dump Channel. Check if Bot is Admin in {DUMP_CHAT_ID}")
+
     for idx in sorted(task["selected"]):
         if task["cancel"]: break
         handle.file_priority(idx, 4)
         f_name = storage.file_path(idx).split('/')[-1]
         f_size = storage.file_size(idx)
         
-        # Auto-Rename
         parsed = PTN.parse(f_name)
         final_name = f"[S{parsed.get('season',0):02d}E{parsed.get('episode',0):02d}] {parsed.get('title','File')} [{parsed.get('quality','HD')}].mkv" if parsed.get('season') else f_name
 
@@ -147,30 +158,35 @@ async def run_download_process(c, h_hash):
             pct = (prog / f_size) * 100
             try:
                 await c.edit_message_text(task["chat_id"], task["msg_id"], f"📥 **Downloading:** `{final_name}`\n`{pct:.1f}%` | 🚀 `{humanize.naturalsize(s.download_rate)}/s` | 👥 P: `{s.num_peers}`")
-            except: pass
+            except MessageNotModified: pass
             await asyncio.sleep(5)
 
         if not task["cancel"]:
             path = os.path.join("./downloads/", storage.file_path(idx))
             
             # STEP 1: UPLOAD TO TELEGRAM DB
-            await c.edit_message_text(task["chat_id"], task["msg_id"], f"📤 **Step 1/2: Dumping to TG DB...**")
-            tg_file = await c.send_document(
-                chat_id=DUMP_CHAT_ID,
-                document=path,
-                caption=f"✅ `{final_name}`\n#Dump",
-                file_name=final_name,
-                progress=tg_prog,
-                progress_args=(await c.get_messages(task["chat_id"], task["msg_id"]), time.time(), final_name)
-            )
+            try:
+                await c.edit_message_text(task["chat_id"], task["msg_id"], f"📤 **Step 1/2: Dumping to TG DB...**")
+                tg_file = await c.send_document(
+                    chat_id=DUMP_CHAT_ID,
+                    document=path,
+                    caption=f"✅ `{final_name}`\n#Dump",
+                    file_name=final_name,
+                    progress=tg_prog,
+                    progress_args=(c, task["chat_id"], task["msg_id"], time.time(), final_name)
+                )
+                tg_link = tg_file.link
+            except Exception as e:
+                await c.send_message(task["chat_id"], f"⚠️ TG Dump Failed: {e}")
+                tg_link = "Failed"
 
             # STEP 2: UPLOAD TO GDRIVE
-            await c.edit_message_text(task["chat_id"], task["msg_id"], f"☁️ **Step 2/2: Uploading to GDrive...**")
             try:
+                await c.edit_message_text(task["chat_id"], task["msg_id"], f"☁️ **Step 2/2: Uploading to GDrive...**")
                 loop = asyncio.get_event_loop()
                 glink = await loop.run_in_executor(None, upload_to_gdrive, path, final_name)
                 
-                out = f"✅ **Processed:** `{final_name}`\n\n🆔 **TG Link:** [Click to View]({tg_file.link})\n☁️ **GDrive:** [Link]({glink})"
+                out = f"✅ **Processed:** `{final_name}`\n\n🆔 **TG Link:** [Click to View]({tg_link})\n☁️ **GDrive:** [Link]({glink})"
                 if INDEX_URL: out += f"\n⚡ **Index:** [Direct]({INDEX_URL}/{final_name.replace(' ', '%20')})"
                 
                 await c.send_message(task["chat_id"], out, disable_web_page_preview=True)

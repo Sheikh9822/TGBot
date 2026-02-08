@@ -6,10 +6,10 @@ from googleapiclient.discovery import build
 from google.oauth2 import service_account
 from googleapiclient.http import MediaFileUpload
 
-# Ignore deprecation warnings for cleaner logs
+# Ignore deprecation warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-# --- 1. CONFIGURATION ---
+# --- CONFIG ---
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
@@ -20,35 +20,22 @@ INDEX_URL = os.environ.get("INDEX_URL", "").rstrip('/')
 # Service Account Setup
 SERVICE_ACCOUNT_JSON = os.environ.get("SERVICE_ACCOUNT_JSON")
 if SERVICE_ACCOUNT_JSON:
-    try:
-        with open('credentials.json', 'w') as f:
-            f.write(SERVICE_ACCOUNT_JSON)
-    except Exception as e:
-        print(f"Error saving Service Account JSON: {e}")
+    with open('credentials.json', 'w') as f: f.write(SERVICE_ACCOUNT_JSON)
 
-# GDrive Auth
-try:
-    creds = service_account.Credentials.from_service_account_file('credentials.json', scopes=['https://www.googleapis.com/auth/drive'])
-    drive_service = build('drive', 'v3', credentials=creds)
-except Exception as e:
-    print(f"GDrive Auth Error: {e}")
+# GDrive Setup
+creds = service_account.Credentials.from_service_account_file('credentials.json', scopes=['https://www.googleapis.com/auth/drive'])
+drive_service = build('drive', 'v3', credentials=creds)
 
-# Torrent Engine (Libtorrent 1.2.x Syntax)
+# Torrent Engine
 app = Client("LeechBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 ses = lt.session({'listen_interfaces': '0.0.0.0:6881'})
 ses.apply_settings({'announce_to_all_trackers': True, 'enable_dht': True, 'download_rate_limit': 0})
 
-TRACKERS = [
-    "udp://tracker.opentrackr.org:1337/announce", 
-    "udp://open.stealth.si:80/announce",
-    "udp://exodus.desync.com:6969/announce"
-]
-
+TRACKERS = ["udp://tracker.opentrackr.org:1337/announce", "udp://open.stealth.si:80/announce"]
 active_tasks = {}
 FILES_PER_PAGE = 8
 
-# --- 2. UTILS ---
-
+# --- UTILS ---
 def get_eta(rem, speed):
     if speed <= 0: return "Unknown"
     return time.strftime("%Hh %Mm %Ss", time.gmtime(rem / speed))
@@ -58,8 +45,7 @@ def upload_to_gdrive(path, name):
     media = MediaFileUpload(path, resumable=True)
     request = drive_service.files().create(body=meta, media_body=media, fields='id, webViewLink')
     resp = None
-    while resp is None:
-        _, resp = request.next_chunk()
+    while resp is None: _, resp = request.next_chunk()
     return resp.get('webViewLink')
 
 async def tg_prog(current, total, client, chat_id, msg_id, start_time, filename):
@@ -92,52 +78,37 @@ def gen_selection_kb(h_hash, page=0):
     btns.append([InlineKeyboardButton("❌ CANCEL", callback_data=f"ca_{h_hash}")])
     return InlineKeyboardMarkup(btns)
 
-# --- 3. BOT HANDLERS ---
-
+# --- HANDLERS ---
 @app.on_message(filters.command("start"))
-async def start_cmd(c, m):
-    await m.reply_text("👋 **Ultimate Torrent Leech Bot**\nSend a magnet link or .torrent file to start.\nFiles will be dumped to TG DB and GDrive.")
+async def start(c, m): await m.reply_text("👋 Send Magnet or .torrent. I will upload to TG DB and GDrive.")
 
 @app.on_message(filters.regex(r"magnet:\?xt=urn:btih:[a-zA-Z0-9]+") | filters.document)
 async def handle_input(c, m):
     if m.document and not m.document.file_name.endswith(".torrent"): return
     msg = await m.reply_text("🧲 **Fetching Metadata...**")
-    
-    try:
-        if m.document:
-            path = await m.download()
-            handle = lt.add_torrent(ses, {'ti': lt.torrent_info(path), 'save_path': './downloads/'})
-            os.remove(path)
-        else:
-            handle = lt.add_magnet_uri(ses, m.text, {'save_path': './downloads/'})
-        
-        for t in TRACKERS: handle.add_tracker({'url': t, 'tier': 0})
-    except Exception as e:
-        return await msg.edit(f"❌ Input Error: {e}")
+    if m.document:
+        path = await m.download()
+        handle = ses.add_torrent({'ti': lt.torrent_info(path), 'save_path': './downloads/'}); os.remove(path)
+    else:
+        params = lt.parse_magnet_uri(m.text); params.save_path = './downloads/'
+        handle = ses.add_torrent(params)
 
-    while not handle.has_metadata(): await asyncio.sleep(1)
+    for t in TRACKERS: handle.add_tracker({'url': t, 'tier': 0})
+    while not handle.status().has_metadata: await asyncio.sleep(1)
     
     info = handle.get_torrent_info()
     h_hash = str(handle.info_hash())
-    
+    storage = info.files()
     files = []
     for i in range(info.num_files()):
-        files.append({
-            "name": info.file_at(i).path.split('/')[-1], 
-            "size": info.file_at(i).size,
-            "path": info.file_at(i).path
-        })
+        files.append({"name": storage.file_path(i).split('/')[-1], "size": storage.file_size(i), "path": storage.file_path(i)})
 
-    active_tasks[h_hash] = {
-        "handle": handle, "selected": [], "files": files, 
-        "chat_id": m.chat.id, "msg_id": msg.id, "cancel": False
-    }
-    
+    active_tasks[h_hash] = {"handle": handle, "selected": [], "files": files, "chat_id": m.chat.id, "msg_id": msg.id, "cancel": False}
     handle.prioritize_files([0] * info.num_files())
-    await msg.edit(f"📂 **Torrent:** `{info.name()}`\nSelect files to process:", reply_markup=gen_selection_kb(h_hash))
+    await msg.edit(f"📂 Torrent: `{info.name()}`\nSelect files:", reply_markup=gen_selection_kb(h_hash))
 
 @app.on_callback_query()
-async def callback_handler(c, q: CallbackQuery):
+async def callbacks(c, q: CallbackQuery):
     data = q.data.split("_")
     action, h_hash = data[0], data[1]
     task = active_tasks.get(h_hash)
@@ -149,78 +120,51 @@ async def callback_handler(c, q: CallbackQuery):
             if idx in task["selected"]: task["selected"].remove(idx)
             else: task["selected"].append(idx)
             await q.message.edit_reply_markup(gen_selection_kb(h_hash, p))
-        elif action == "page":
-            await q.message.edit_reply_markup(gen_selection_kb(h_hash, int(data[2])))
+        elif action == "page": await q.message.edit_reply_markup(gen_selection_kb(h_hash, int(data[2])))
         elif action == "start":
-            if not task["selected"]: return await q.answer("Select at least one file!", show_alert=True)
-            await q.answer("Starting Processing...")
+            if not task["selected"]: return await q.answer("Select at least one file!")
+            await q.answer("Processing started...")
             asyncio.create_task(run_download_process(c, h_hash))
-        elif action == "pa":
-            task["handle"].pause(); await q.answer("Paused")
-        elif action == "re":
-            task["handle"].resume(); await q.answer("Resumed")
         elif action == "ca":
-            task["cancel"] = True
-            ses.remove_torrent(task["handle"])
-            await q.message.edit("❌ Task Cancelled.")
-            active_tasks.pop(h_hash, None)
+            task["cancel"] = True; ses.remove_torrent(task["handle"]); await q.message.edit("❌ Cancelled."); active_tasks.pop(h_hash, None)
     except MessageNotModified: pass
-
-# --- 4. CORE ENGINE (DOWNLOAD -> TG -> GDRIVE) ---
 
 async def run_download_process(c, h_hash):
     task = active_tasks[h_hash]
     handle, info = task["handle"], task["handle"].get_torrent_info()
+    storage = info.files()
     
-    # Force resolve Dump Channel handshake
+    # FIX: Warm-up the channel so Pyrogram recognizes the ID
     try:
         await c.get_chat(DUMP_CHAT_ID)
     except Exception as e:
-        return await c.send_message(task["chat_id"], f"❌ **DUMP ERROR:** Bot cannot find Chat ID `{DUMP_CHAT_ID}`.\nMake sure Bot is Admin in that channel.")
+        print(f"Error accessing Dump Channel: {e}")
+        return await c.send_message(task["chat_id"], f"❌ Bot cannot access Dump Channel. Check if Bot is Admin in {DUMP_CHAT_ID}")
 
     for idx in sorted(task["selected"]):
         if task["cancel"]: break
+        handle.file_priority(idx, 4)
+        f_name = storage.file_path(idx).split('/')[-1]
+        f_size = storage.file_size(idx)
         
-        file = info.file_at(idx)
-        handle.file_priority(idx, 4) # Priority: Normal
-        f_name = file.path.split('/')[-1]
-        
-        # Auto-Rename Logic (PTN)
         parsed = PTN.parse(f_name)
-        if parsed.get('season') and parsed.get('episode'):
-            final_name = f"[S{parsed.get('season',0):02d}E{parsed.get('episode',0):02d}] {parsed.get('title','File')} [{parsed.get('quality','HD')}].mkv"
-        else:
-            final_name = f_name
+        final_name = f"[S{parsed.get('season',0):02d}E{parsed.get('episode',0):02d}] {parsed.get('title','File')} [{parsed.get('quality','HD')}].mkv" if parsed.get('season') else f_name
 
-        # Download Loop
         while True:
             if task["cancel"]: break
             s = handle.status()
             prog = handle.file_progress()[idx]
-            if prog >= file.size: break
-            
-            pct = (prog / file.size) * 100
-            eta = get_eta(file.size - prog, s.download_rate)
-            
-            kb = InlineKeyboardMarkup([[
-                InlineKeyboardButton("⏸ Pause" if not s.paused else "▶️ Resume", callback_data=f"{'pa' if not s.paused else 're'}_{h_hash}"),
-                InlineKeyboardButton("❌ Cancel", callback_data=f"ca_{h_hash}")
-            ]])
-            
+            if prog >= f_size: break
+            pct = (prog / f_size) * 100
             try:
-                await c.edit_message_text(task["chat_id"], task["msg_id"], 
-                    f"📥 **Downloading:** `{final_name}`\n"
-                    f"`{pct:.1f}%` | 🚀 `{humanize.naturalsize(s.download_rate)}/s`\n"
-                    f"⏳ ETA: `{eta}` | 👥 P: `{s.num_peers}`",
-                    reply_markup=kb
-                )
+                await c.edit_message_text(task["chat_id"], task["msg_id"], f"📥 **Downloading:** `{final_name}`\n`{pct:.1f}%` | 🚀 `{humanize.naturalsize(s.download_rate)}/s` | 👥 P: `{s.num_peers}`")
             except MessageNotModified: pass
             await asyncio.sleep(5)
 
         if not task["cancel"]:
-            path = os.path.join("./downloads/", file.path)
+            path = os.path.join("./downloads/", storage.file_path(idx))
             
-            # STEP 1: UPLOAD TO TELEGRAM DUMP
+            # STEP 1: UPLOAD TO TELEGRAM DB
             try:
                 await c.edit_message_text(task["chat_id"], task["msg_id"], f"📤 **Step 1/2: Dumping to TG DB...**")
                 tg_file = await c.send_document(
@@ -233,7 +177,8 @@ async def run_download_process(c, h_hash):
                 )
                 tg_link = tg_file.link
             except Exception as e:
-                tg_link = f"Failed: {e}"
+                await c.send_message(task["chat_id"], f"⚠️ TG Dump Failed: {e}")
+                tg_link = "Failed"
 
             # STEP 2: UPLOAD TO GDRIVE
             try:
@@ -241,30 +186,19 @@ async def run_download_process(c, h_hash):
                 loop = asyncio.get_event_loop()
                 glink = await loop.run_in_executor(None, upload_to_gdrive, path, final_name)
                 
-                # Output
                 out = f"✅ **Processed:** `{final_name}`\n\n🆔 **TG Link:** [Click to View]({tg_link})\n☁️ **GDrive:** [Link]({glink})"
-                if INDEX_URL:
-                    out += f"\n⚡ **Index:** [Direct Link]({INDEX_URL}/{final_name.replace(' ', '%20')})"
+                if INDEX_URL: out += f"\n⚡ **Index:** [Direct]({INDEX_URL}/{final_name.replace(' ', '%20')})"
                 
                 await c.send_message(task["chat_id"], out, disable_web_page_preview=True)
-            except Exception as e:
-                await c.send_message(task["chat_id"], f"❌ GDrive Error for `{final_name}`: {e}")
+            except Exception as e: await c.send_message(task["chat_id"], f"❌ GDrive Error: {e}")
             finally:
                 if os.path.exists(path): os.remove(path)
-                handle.file_priority(idx, 0) # Clear disk
+                handle.file_priority(idx, 0)
 
-    await c.send_message(task["chat_id"], "🏁 **Torrent Task Finished.**"); active_tasks.pop(h_hash, None)
-
-# --- 5. RUN BOT ---
+    await c.send_message(task["chat_id"], "🏁 Task Finished."); active_tasks.pop(h_hash, None)
 
 if __name__ == "__main__":
     while True:
-        try:
-            print("Bot is starting...")
-            app.run()
-        except FloodWait as e:
-            print(f"FloodWait: Sleeping {e.value}s")
-            time.sleep(e.value + 5)
-        except Exception as e:
-            print(f"Unexpected Error: {e}")
-            time.sleep(10)
+        try: app.run()
+        except FloodWait as e: time.sleep(e.value + 5)
+        except Exception: time.sleep(10)

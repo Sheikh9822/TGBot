@@ -4,7 +4,7 @@ from pyrogram.types import CallbackQuery
 from pyrogram.errors import FloodWait
 
 import config
-from utils import edit_msg, gen_selection_kb, clean_rename, get_eta
+from utils import edit_msg, gen_selection_kb, clean_rename, get_eta, get_prog_bar
 from tg_uploader import upload_to_tg_db
 from gdrive_uploader import upload_to_gdrive
 
@@ -16,7 +16,7 @@ active_tasks = {}
 
 @app.on_message(filters.command("start"))
 async def start_cmd(c, m):
-    await m.reply_text("👋 Bot Modularized. Send Magnet link.")
+    await m.reply_text("👋 **Modular Torrent Leech Bot**\nSend Magnet or .torrent file.")
 
 @app.on_message(filters.forwarded & filters.private)
 async def handle_forward(c, m):
@@ -28,17 +28,21 @@ async def handle_forward(c, m):
 
 @app.on_message(filters.regex(r"magnet:\?xt=urn:btih:[a-zA-Z0-9]+") | filters.document)
 async def handle_input(c, m):
+    if m.document and not m.document.file_name.endswith(".torrent"): return
     msg = await m.reply_text("🧲 Fetching Metadata...")
     if m.document:
         path = await m.download()
         h = ses.add_torrent({'ti': lt.torrent_info(path), 'save_path': './downloads/'}); os.remove(path)
     else:
-        p = lt.parse_magnet_uri(m.text); p.save_path = './downloads/'; h = ses.add_torrent(p)
+        params = lt.parse_magnet_uri(m.text); params.save_path = './downloads/'; h = ses.add_torrent(params)
     
     while not h.status().has_metadata: await asyncio.sleep(1)
     
-    info = h.get_torrent_info(); h_hash = str(h.info_hash())
-    files = [{"name": info.files().file_path(i).split('/')[-1], "size": info.files().file_size(i), "path": info.files().file_path(i)} for i in range(info.num_files())]
+    info = h.get_torrent_info()
+    h_hash = str(h.info_hash())
+    files = []
+    for i in range(info.num_files()):
+        files.append({"name": info.file_at(i).path.split('/')[-1], "size": info.file_at(i).size, "path": info.file_at(i).path})
     
     active_tasks[h_hash] = {"handle": h, "selected": [], "files": files, "chat_id": m.chat.id, "msg_id": msg.id, "cancel": False}
     h.prioritize_files([0] * info.num_files())
@@ -56,10 +60,14 @@ async def callbacks(c, q: CallbackQuery):
         if idx in task["selected"]: task["selected"].remove(idx)
         else: task["selected"].append(idx)
         await q.message.edit_reply_markup(gen_selection_kb(active_tasks, h_hash, p))
+    elif action == "page":
+        await q.message.edit_reply_markup(gen_selection_kb(active_tasks, h_hash, int(data[2])))
     elif action == "start":
+        await q.answer("Processing started...")
         asyncio.create_task(run_process(c, h_hash))
     elif action == "ca":
         task["cancel"] = True; active_tasks.pop(h_hash, None)
+        await edit_msg(c, q.message.chat.id, q.message.id, "❌ Cancelled.")
 
 async def run_process(c, h_hash):
     task = active_tasks[h_hash]
@@ -68,8 +76,9 @@ async def run_process(c, h_hash):
     for idx in sorted(task["selected"]):
         if task["cancel"]: break
         handle.file_priority(idx, 4)
-        f_name = info.files().file_path(idx).split('/')[-1]
-        f_size = info.files().file_size(idx)
+        file_info = info.file_at(idx)
+        f_name = file_info.path.split('/')[-1]
+        f_size = file_info.size
         final_name = clean_rename(f_name)
 
         while True:
@@ -77,29 +86,39 @@ async def run_process(c, h_hash):
             s = handle.status()
             prog = handle.file_progress()[idx]
             if prog >= f_size: break
-            await edit_msg(c, task["chat_id"], task["msg_id"], f"📥 Downloading: `{final_name}`\n`{(prog/f_size)*100:.1f}%` | 🚀 `{humanize.naturalsize(s.download_rate)}/s`")
+            
+            pct = (prog / f_size) * 100
+            eta = get_eta(f_size - prog, s.download_rate)
+            text = (f"📥 Downloading: `{final_name}`\n"
+                    f"[{get_prog_bar(pct)}] {pct:.1f}%\n"
+                    f"🚀 `{humanize.naturalsize(s.download_rate)}/s` | ⏳ ETA: {eta}")
+            await edit_msg(c, task["chat_id"], task["msg_id"], text)
             await asyncio.sleep(5)
 
         if not task["cancel"]:
-            path = os.path.join("./downloads/", info.files().file_path(idx))
+            path = os.path.join("./downloads/", file_info.path)
             
             # 1. TG Uploader
+            await edit_msg(c, task["chat_id"], task["msg_id"], f"📤 Step 1/2: Uploading to TG DB...")
             tg_link = await upload_to_tg_db(c, path, final_name, task["chat_id"], task["msg_id"])
             
             # 2. GDrive Uploader
-            await edit_msg(c, task["chat_id"], task["msg_id"], "☁️ Uploading to GDrive...")
+            await edit_msg(c, task["chat_id"], task["msg_id"], f"☁️ Step 2/2: Uploading to GDrive...")
             try:
                 loop = asyncio.get_event_loop()
                 glink = await loop.run_in_executor(None, upload_to_gdrive, path, final_name)
                 
                 out = f"✅ `{final_name}`\n\n🆔 [Telegram DB]({tg_link})\n☁️ [GDrive]({glink})"
-                if config.INDEX_URL: out += f"\n⚡ [Direct Index Link]({config.INDEX_URL}/{final_name.replace(' ', '%20')})"
+                if config.INDEX_URL: 
+                    clean_url = final_name.replace(' ', '%20')
+                    out += f"\n⚡ [Direct Index Link]({config.INDEX_URL}/{clean_url})"
                 await c.send_message(task["chat_id"], out, disable_web_page_preview=True)
             except Exception as e: await c.send_message(task["chat_id"], f"GDrive Error: {e}")
             finally:
                 if os.path.exists(path): os.remove(path)
                 handle.file_priority(idx, 0)
 
+    await c.send_message(task["chat_id"], "🏁 Task Finished.")
     active_tasks.pop(h_hash, None)
 
 if __name__ == "__main__":
@@ -107,5 +126,7 @@ if __name__ == "__main__":
         await app.start()
         try: await app.get_chat(config.DUMP_CHAT_ID)
         except: pass
+        print("Bot is Live!")
         await asyncio.Event().wait()
+    
     asyncio.get_event_loop().run_until_complete(run_bot())

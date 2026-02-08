@@ -1,33 +1,34 @@
 import os
-import json
+import logging
 from googleapiclient.discovery import build
 from google.oauth2 import service_account
 from googleapiclient.http import MediaFileUpload
 from config import GDRIVE_FOLDER_ID
 
-def get_drive_service():
+# Setup logging to see errors in Koyeb Console
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def upload_to_gdrive(path, name):
     try:
-        # This handles both file paths and potential JSON formatting issues
+        # 1. Check if credentials file exists
+        if not os.path.exists('credentials.json'):
+            return "Error: credentials.json file missing on server."
+
+        # 2. Initialize Service
         creds = service_account.Credentials.from_service_account_file(
             'credentials.json', 
             scopes=['https://www.googleapis.com/auth/drive']
         )
-        return build('drive', 'v3', credentials=creds, cache_discovery=False)
-    except Exception as e:
-        raise Exception(f"Failed to initialize GDrive Service: {e}")
+        service = build('drive', 'v3', credentials=creds, cache_discovery=False)
 
-def upload_to_gdrive(path, name):
-    try:
-        service = get_drive_service()
+        # 3. Setup Metadata
         file_metadata = {'name': name, 'parents': [GDRIVE_FOLDER_ID]}
+        media = MediaFileUpload(path, resumable=True)
         
-        # resumable=True is required for files over 10MB
-        media = MediaFileUpload(
-            path, 
-            mimetype='application/octet-stream', 
-            resumable=True
-        )
-        
+        logger.info(f"Starting GDrive upload for: {name}")
+
+        # 4. Perform Upload
         request = service.files().create(
             body=file_metadata,
             media_body=media,
@@ -38,15 +39,10 @@ def upload_to_gdrive(path, name):
         while response is None:
             status, response = request.next_chunk()
             if status:
-                print(f"Uploading {name}: {int(status.progress() * 100)}%")
+                logger.info(f"Upload Progress: {int(status.progress() * 100)}%")
                 
         return response.get('webViewLink')
-    
+
     except Exception as e:
-        # This will send the exact error back to bot.py
-        error_msg = str(e)
-        if "File not found" in error_msg:
-            return "Error: GDRIVE_FOLDER_ID is wrong or Service Account not invited to folder."
-        if "Insufficient Permission" in error_msg:
-            return "Error: Service Account must be 'Editor' in the GDrive folder."
-        return f"GDrive Error: {error_msg}"
+        logger.error(f"GDrive Crash: {str(e)}")
+        return f"Error: {str(e)}"

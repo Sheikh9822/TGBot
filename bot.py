@@ -8,13 +8,13 @@ from pyrogram import Client, filters
 from pyrogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import FloodWait, MessageNotModified
 
-# Import our modular components
+# Import modular components
 import config
 from utils import edit_msg, gen_selection_kb, clean_rename, get_eta, get_prog_bar
 from tg_uploader import upload_to_tg_db
 from gdrive_uploader import upload_to_gdrive
 
-# Silence Libtorrent 1.2.x deprecation warnings for cleaner Koyeb logs
+# Silence Libtorrent deprecation warnings for cleaner logs
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # Initialize Pyrogram Client
@@ -25,9 +25,8 @@ app = Client(
     bot_token=config.BOT_TOKEN
 )
 
-# Initialize Torrent Session (Legacy syntax for Libtorrent 1.2.x compatibility)
-ses = lt.session()
-ses.listen_on(6881, 6891)
+# Initialize Torrent Session
+ses = lt.session({'listen_interfaces': '0.0.0.0:6881'})
 ses.apply_settings({
     'announce_to_all_trackers': True, 
     'enable_dht': True, 
@@ -35,7 +34,7 @@ ses.apply_settings({
     'connections_limit': 200
 })
 
-# High-speed trackers to boost peer discovery
+# High-performance trackers
 TRACKERS = [
     "udp://tracker.opentrackr.org:1337/announce",
     "udp://open.stealth.si:80/announce",
@@ -52,16 +51,17 @@ async def start_cmd(c, m):
         "👋 **Ultimate Torrent Leech Bot**\n\n"
         "1. Send a Magnet link or upload a .torrent file.\n"
         "2. Use the menu to select files.\n"
-        "3. Bot will dump to Telegram DB and upload to GDrive."
+        "3. Bot will dump to Telegram DB and upload to GDrive.\n\n"
+        "**Note:** If Dump fails, forward a message from your storage channel to me."
     )
 
 @app.on_message(filters.forwarded & filters.private)
 async def handle_forward(c, m):
-    """Used to resolve Private Channel IDs for the Dump setup"""
+    """Resolves Private Channel IDs to help resolve PeerIdInvalid errors"""
     if m.forward_from_chat:
         try:
             chat = await c.get_chat(m.forward_from_chat.id)
-            await m.reply_text(f"✅ **Resolved Chat:**\nName: {chat.title}\nID: `{chat.id}`")
+            await m.reply_text(f"✅ **Resolved Chat Info:**\nName: {chat.title}\nID: `{chat.id}`")
         except Exception as e:
             await m.reply_text(f"❌ Error: {e}")
 
@@ -78,7 +78,9 @@ async def handle_input(c, m):
             h = ses.add_torrent({'ti': lt.torrent_info(path), 'save_path': './downloads/'})
             os.remove(path)
         else:
-            h = lt.add_magnet_uri(ses, m.text, {'save_path': './downloads/'})
+            params = lt.parse_magnet_uri(m.text)
+            params.save_path = './downloads/'
+            h = ses.add_torrent(params)
         
         for t in TRACKERS:
             h.add_tracker({'url': t, 'tier': 0})
@@ -87,7 +89,7 @@ async def handle_input(c, m):
         return await edit_msg(c, m.chat.id, msg.id, f"❌ **Invalid Input:** {e}")
 
     # Wait for metadata
-    while not h.has_metadata():
+    while not h.status().has_metadata:
         await asyncio.sleep(1)
     
     info = h.get_torrent_info()
@@ -111,7 +113,7 @@ async def handle_input(c, m):
         "cancel": False
     }
     
-    # Skip all files initially to save disk until user confirms selection
+    # Skip files initially to save disk
     h.prioritize_files([0] * info.num_files())
     
     await edit_msg(c, m.chat.id, msg.id, f"📂 **Torrent:** `{info.name()}`\nSelect files below:", reply_markup=gen_selection_kb(active_tasks, h_hash))
@@ -131,7 +133,6 @@ async def callbacks(c, q: CallbackQuery):
             task["selected"].remove(idx)
         else:
             task["selected"].append(idx)
-        # Update the markup to show the checkmark
         try:
             await q.message.edit_reply_markup(gen_selection_kb(active_tasks, h_hash, p))
         except MessageNotModified:
@@ -163,7 +164,7 @@ async def run_process(c, h_hash):
         if task["cancel"]:
             break
             
-        handle.file_priority(idx, 4) # 4 is normal priority
+        handle.file_priority(idx, 4)
         file_info = info.file_at(idx)
         f_name = file_info.path.split('/')[-1]
         f_size = file_info.size
@@ -196,7 +197,7 @@ async def run_process(c, h_hash):
             path = os.path.join("./downloads/", file_info.path)
             
             # 1. Telegram Dump
-            await edit_msg(c, task["chat_id"], task["msg_id"], f"📤 **Step 1/2:** Uploading to Telegram DB...")
+            await edit_msg(c, task["chat_id"], task["msg_id"], f"📤 **Step 1/2:** Uploading to TG DB...")
             tg_link = await upload_to_tg_db(c, path, final_name, task["chat_id"], task["msg_id"])
             
             # 2. Google Drive Upload
@@ -205,24 +206,26 @@ async def run_process(c, h_hash):
                 loop = asyncio.get_event_loop()
                 glink = await loop.run_in_executor(None, upload_to_gdrive, path, final_name)
                 
-                if glink.startswith("Error"):
-                    await c.send_message(task["chat_id"], f"❌ **GDRIVE FAILED**\n`{glink}`")
-                else:
-                    out = (
-                        f"✅ **Leech Success**\n"
-                        f"📝 `{final_name}`\n\n"
-                        f"🆔 [Telegram DB]({tg_link})\n"
-                        f"☁️ [Google Drive]({glink})"
-                    )
-                    if config.INDEX_URL: 
-                        clean_url = final_name.replace(' ', '%20')
-                        out += f"\n⚡ [Direct Index Link]({config.INDEX_URL}/{clean_url})"
+                # SAFETY CHECK: Only create links if they are valid URLs
+                tg_out = f"[Telegram DB]({tg_link})" if tg_link.startswith("http") else f"TG Error: {tg_link}"
+                gd_out = f"[Google Drive]({glink})" if glink.startswith("http") else f"GDrive Error: {glink}"
+
+                out = (
+                    f"✅ **Leech Success**\n"
+                    f"📝 `{final_name}`\n\n"
+                    f"🆔 {tg_out}\n"
+                    f"☁️ {gd_out}"
+                )
+                
+                if config.INDEX_URL and glink.startswith("http"):
+                    clean_url = final_name.replace(' ', '%20')
+                    out += f"\n⚡ [Direct Index Link]({config.INDEX_URL}/{clean_url})"
+                
+                await c.send_message(task["chat_id"], out, disable_web_page_preview=True)
                     
-                    await c.send_message(task["chat_id"], out, disable_web_page_preview=True)
             except Exception as e:
-                await c.send_message(task["chat_id"], f"❌ **GDrive Fatal Error:**\n`{e}`")
+                await c.send_message(task["chat_id"], f"❌ **Bot Error:**\n`{e}`")
             finally:
-                # Immediate Disk Cleanup
                 if os.path.exists(path):
                     os.remove(path)
                 handle.file_priority(idx, 0)
@@ -235,7 +238,7 @@ if __name__ == "__main__":
         print("Bot starting...")
         await app.start()
         
-        # Warm up Peer Cache for Dump Channel
+        # Warm up Peer Cache
         try:
             await app.get_chat(config.DUMP_CHAT_ID)
             print(f"Dump Channel {config.DUMP_CHAT_ID} Resolved.")
@@ -245,7 +248,6 @@ if __name__ == "__main__":
         print("Bot is LIVE!")
         await asyncio.Event().wait()
     
-    # Wrap in retry loop to handle FloodWait
     while True:
         try:
             asyncio.get_event_loop().run_until_complete(main())

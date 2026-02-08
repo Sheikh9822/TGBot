@@ -22,4 +22,4 @@ async def upload_to_tg_db(client, path, filename, status_chat_id, status_msg_id)
         )
         return sent_file.link
     except Exception as e:
-        return f"Upload Failed: {e}"
+        return f"TG Upload Failed: {e}"

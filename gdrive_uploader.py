@@ -5,8 +5,11 @@ from googleapiclient.http import MediaFileUpload
 from config import GDRIVE_FOLDER_ID
 
 # Initialize GDrive Service
-creds = service_account.Credentials.from_service_account_file('credentials.json', scopes=['https://www.googleapis.com/auth/drive'])
-drive_service = build('drive', 'v3', credentials=creds)
+try:
+    creds = service_account.Credentials.from_service_account_file('credentials.json', scopes=['https://www.googleapis.com/auth/drive'])
+    drive_service = build('drive', 'v3', credentials=creds)
+except Exception as e:
+    print(f"GDrive Init Error: {e}")
 
 def upload_to_gdrive(path, name):
     meta = {'name': name, 'parents': [GDRIVE_FOLDER_ID]}

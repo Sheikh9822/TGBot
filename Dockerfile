@@ -1,16 +1,8 @@
-FROM python:3.11-slim
-
-# Install aria2
-RUN apt-get update && apt-get install -y aria2 && rm -rf /var/lib/apt/lists/*
-
+FROM python:3.11-slim-bookworm
+RUN apt-get update && apt-get install -y python3-libtorrent && rm -rf /var/lib/apt/lists/*
+ENV PYTHONPATH="/usr/lib/python3/dist-packages"
+ENV PYTHONUNBUFFERED=1
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
 COPY . .
-
-# Create download directory
-RUN mkdir -p /tmp/downloads && chmod 777 /tmp/downloads
-
-# Start aria2 RPC daemon and then start the bot
-CMD aria2c --enable-rpc --rpc-listen-all=true --rpc-allow-origin-all=true --daemon && python main.py
+RUN pip install --no-cache-dir -r requirements.txt
+CMD gunicorn app:app --bind 0.0.0.0:$PORT --daemon && python3 bot.py

@@ -1,7 +1,7 @@
 import os, asyncio, time, json, libtorrent as lt, humanize, PTN, warnings
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from pyrogram.errors import FloodWait, MessageNotModified, PeerIdInvalid
+from pyrogram.errors import FloodWait, MessageNotModified, PeerIdInvalid, RPCError
 from googleapiclient.discovery import build
 from google.oauth2 import service_account
 from googleapiclient.http import MediaFileUpload
@@ -17,7 +17,7 @@ DUMP_CHAT_ID = int(os.environ.get("DUMP_CHAT_ID", 0))
 GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "")
 INDEX_URL = os.environ.get("INDEX_URL", "").rstrip('/')
 
-# Service Account Setup
+# GDrive Setup
 SERVICE_ACCOUNT_JSON = os.environ.get("SERVICE_ACCOUNT_JSON")
 if SERVICE_ACCOUNT_JSON:
     with open('credentials.json', 'w') as f: f.write(SERVICE_ACCOUNT_JSON)
@@ -37,10 +37,8 @@ FILES_PER_PAGE = 8
 async def edit_msg(client, chat_id, message_id, text, reply_markup=None):
     try:
         await client.edit_message_text(chat_id, message_id, text, reply_markup=reply_markup)
-    except MessageNotModified:
-        pass
-    except Exception as e:
-        print(f"Edit Error: {e}")
+    except MessageNotModified: pass
+    except Exception as e: print(f"Edit Error: {e}")
 
 def upload_to_gdrive(path, name):
     meta = {'name': name, 'parents': [GDRIVE_FOLDER_ID]}
@@ -84,7 +82,6 @@ async def start(c, m): await m.reply_text("👋 Bot is active. Send Magnet or .t
 async def handle_input(c, m):
     if m.document and not m.document.file_name.endswith(".torrent"): return
     msg = await m.reply_text("🧲 **Fetching Metadata...**")
-    
     if m.document:
         path = await m.download()
         handle = ses.add_torrent({'ti': lt.torrent_info(path), 'save_path': './downloads/'}); os.remove(path)
@@ -152,7 +149,9 @@ async def run_download_process(c, h_hash):
             
             # STEP 1: TG DUMP
             await edit_msg(c, task["chat_id"], task["msg_id"], f"📤 **Step 1/2: Dumping to TG DB...**")
+            tg_link = "Not Available"
             try:
+                # Direct attempt to send - this forces peer resolution
                 tg_file = await c.send_document(
                     chat_id=DUMP_CHAT_ID,
                     document=path,
@@ -162,14 +161,15 @@ async def run_download_process(c, h_hash):
                 )
                 tg_link = tg_file.link
             except Exception as e:
-                tg_link = f"Error: {e}"
+                print(f"Dump Error: {e}")
+                tg_link = f"Upload failed: {e}"
 
             # STEP 2: GDRIVE
             await edit_msg(c, task["chat_id"], task["msg_id"], f"☁️ **Step 2/2: Uploading to GDrive...**")
             try:
                 loop = asyncio.get_event_loop()
                 glink = await loop.run_in_executor(None, upload_to_gdrive, path, final_name)
-                out = f"✅ **Processed:** `{final_name}`\n\n🆔 **TG Link:** [View]({tg_link})\n☁️ **GDrive:** [Link]({glink})"
+                out = f"✅ **Processed:** `{final_name}`\n\n🆔 **TG Link:** {tg_link}\n☁️ **GDrive:** [Link]({glink})"
                 if INDEX_URL: out += f"\n⚡ **Index:** [Direct Link]({INDEX_URL}/{final_name.replace(' ', '%20')})"
                 await c.send_message(task["chat_id"], out, disable_web_page_preview=True)
             except Exception as e: await c.send_message(task["chat_id"], f"❌ GDrive Error: {e}")
@@ -179,23 +179,21 @@ async def run_download_process(c, h_hash):
 
     await c.send_message(task["chat_id"], "🏁 Task Finished."); active_tasks.pop(h_hash, None)
 
-# Start logic with Peer Warmup
+# --- STARTUP LOGIC ---
 if __name__ == "__main__":
     async def main():
         await app.start()
-        print("Checking Dump Channel access...")
+        print(f"Checking Dump Channel: {DUMP_CHAT_ID}")
         try:
-            await app.get_chat(DUMP_CHAT_ID)
-            print("Dump Channel Resolved!")
-        except Exception as e:
-            print(f"Warning: Could not resolve Dump Channel: {e}. Make sure ID is correct and Bot is Admin.")
+            # Force Telegram to recognize the chat by sending a test message
+            test = await app.send_message(DUMP_CHAT_ID, "🔄 **Bot Initialized.** This message confirms the Dump Channel is working.")
+            await test.delete() # Remove the test message immediately
+            print("Dump Channel Access: SUCCESS")
+        except RPCError as e:
+            print(f"Dump Channel Access: FAILED - {e}")
+            print("FIX: Add the bot as Admin to the channel and restart.")
         
-        # Keep bot running
-        print("Bot is live!")
-        await asyncio.Event().wait()
+        await asyncio.Event().wait() # Keep bot alive
 
     loop = asyncio.get_event_loop()
-    try:
-        loop.run_until_complete(main())
-    except KeyboardInterrupt:
-        pass
+    loop.run_until_complete(main())

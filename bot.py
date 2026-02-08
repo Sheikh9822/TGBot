@@ -1,10 +1,13 @@
-import os, asyncio, time, json, libtorrent as lt, humanize, PTN
+import os, asyncio, time, json, libtorrent as lt, humanize, PTN, warnings
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import FloodWait
 from googleapiclient.discovery import build
 from google.oauth2 import service_account
 from googleapiclient.http import MediaFileUpload
+
+# Ignore deprecation warnings in console logs
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # --- CONFIG ---
 API_ID = int(os.environ.get("API_ID", 0))
@@ -13,7 +16,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "")
 INDEX_URL = os.environ.get("INDEX_URL", "").rstrip('/')
 
-# Service Account JSON from Env
+# Service Account JSON
 SERVICE_ACCOUNT_JSON = os.environ.get("SERVICE_ACCOUNT_JSON")
 if SERVICE_ACCOUNT_JSON:
     with open('credentials.json', 'w') as f: f.write(SERVICE_ACCOUNT_JSON)
@@ -22,11 +25,16 @@ if SERVICE_ACCOUNT_JSON:
 creds = service_account.Credentials.from_service_account_file('credentials.json', scopes=['https://www.googleapis.com/auth/drive'])
 drive_service = build('drive', 'v3', credentials=creds)
 
-# Torrent Engine
+# Torrent Engine - MODERN SESSION SETUP
 app = Client("LeechBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-ses = lt.session()
-ses.listen_on(6881, 6891)
-ses.apply_settings({'announce_to_all_trackers': True, 'enable_dht': True, 'download_rate_limit': 0})
+# Replaces deprecated listen_on()
+ses = lt.session({'listen_interfaces': '0.0.0.0:6881'})
+ses.apply_settings({
+    'announce_to_all_trackers': True, 
+    'enable_dht': True, 
+    'download_rate_limit': 0,
+    'connections_limit': 200
+})
 
 TRACKERS = ["udp://tracker.opentrackr.org:1337/announce", "udp://open.stealth.si:80/announce", "udp://exodus.desync.com:6969/announce"]
 
@@ -71,16 +79,36 @@ async def start(c, m): await m.reply_text("👋 Send Magnet or .torrent file to 
 async def handle_input(c, m):
     if m.document and not m.document.file_name.endswith(".torrent"): return
     msg = await m.reply_text("🧲 **Fetching Metadata...**")
+    
     if m.document:
-        path = await m.download(); handle = lt.add_torrent(ses, {'ti': lt.torrent_info(path), 'save_path': './downloads/'}); os.remove(path)
+        path = await m.download()
+        # MODERN add_torrent for files
+        handle = ses.add_torrent({'ti': lt.torrent_info(path), 'save_path': './downloads/'})
+        os.remove(path)
     else:
-        handle = lt.add_magnet_uri(ses, m.text, {'save_path': './downloads/'})
+        # MODERN add_torrent for magnets (replaces add_magnet_uri)
+        params = lt.parse_magnet_uri(m.text)
+        params.save_path = './downloads/'
+        handle = ses.add_torrent(params)
+
     for t in TRACKERS: handle.add_tracker({'url': t, 'tier': 0})
-    while not handle.has_metadata(): await asyncio.sleep(1)
+    
+    # MODERN status check (replaces has_metadata())
+    while not handle.status().has_metadata: await asyncio.sleep(1)
     
     info = handle.get_torrent_info()
     h_hash = str(handle.info_hash())
-    files = [{"name": info.file_at(i).path.split('/')[-1], "size": info.file_at(i).size, "path": info.file_at(i).path} for i in range(info.num_files())]
+    
+    # MODERN file iteration
+    files = []
+    storage = info.files()
+    for i in range(info.num_files()):
+        files.append({
+            "name": storage.file_path(i).split('/')[-1], 
+            "size": storage.file_size(i), 
+            "path": storage.file_path(i)
+        })
+
     active_tasks[h_hash] = {"handle": handle, "selected": [], "files": files, "chat_id": m.chat.id, "msg_id": msg.id, "cancel": False}
     handle.prioritize_files([0] * info.num_files())
     await msg.edit(f"📂 Torrent: `{info.name()}`\nSelect files:", reply_markup=gen_selection_kb(h_hash))
@@ -109,23 +137,29 @@ async def callbacks(c, q: CallbackQuery):
 
 async def run_download(c, h_hash):
     task = active_tasks[h_hash]
-    handle, info = task["handle"], task["handle"].get_torrent_info()
+    handle = task["handle"]
+    info = handle.get_torrent_info()
+    storage = info.files()
+    
     for idx in sorted(task["selected"]):
         if task["cancel"]: break
-        file = info.file_at(idx)
         handle.file_priority(idx, 4)
         
+        f_name = storage.file_path(idx).split('/')[-1]
+        f_size = storage.file_size(idx)
+        
         # Auto-Rename Logic
-        parsed = PTN.parse(file.path.split('/')[-1])
-        final_name = f"[S{parsed.get('season',0):02d}E{parsed.get('episode',0):02d}] {parsed.get('title','File')} [{parsed.get('quality','HD')}].mkv" if parsed.get('season') else file.path.split('/')[-1]
+        parsed = PTN.parse(f_name)
+        final_name = f"[S{parsed.get('season',0):02d}E{parsed.get('episode',0):02d}] {parsed.get('title','File')} [{parsed.get('quality','HD')}].mkv" if parsed.get('season') else f_name
 
         while True:
             if task["cancel"]: break
             s = handle.status()
             prog = handle.file_progress()[idx]
-            if prog >= file.size: break
-            pct = (prog / file.size) * 100
-            eta = get_eta(file.size - prog, s.download_rate)
+            if prog >= f_size: break
+            
+            pct = (prog / f_size) * 100 if f_size > 0 else 0
+            eta = get_eta(f_size - prog, s.download_rate)
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("⏸ Pause" if not s.paused else "▶️ Resume", callback_data=f"{'pa' if not s.paused else 're'}_{h_hash}"), InlineKeyboardButton("❌ Cancel", callback_data=f"ca_{h_hash}")]])
             try:
                 await c.edit_message_text(task["chat_id"], task["msg_id"], f"📥 **Downloading:** `{final_name}`\n`{pct:.1f}%` | 🚀 `{humanize.naturalsize(s.download_rate)}/s`\n⏳ ETA: `{eta}` | 👥 P: `{s.num_peers}`", reply_markup=kb)
@@ -134,7 +168,7 @@ async def run_download(c, h_hash):
 
         if not task["cancel"]:
             await c.edit_message_text(task["chat_id"], task["msg_id"], f"☁️ **Uploading:** `{final_name}`")
-            path = os.path.join("./downloads/", file.path)
+            path = os.path.join("./downloads/", storage.file_path(idx))
             try:
                 loop = asyncio.get_event_loop()
                 glink = await loop.run_in_executor(None, upload_to_gdrive, path, final_name)

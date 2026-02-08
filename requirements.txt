@@ -1,0 +1,6 @@
+pyrogram
+tgcrypto
+aria2p
+google-api-python-client
+google-auth
+python-dotenv

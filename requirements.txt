@@ -1,6 +1,9 @@
 pyrogram
 tgcrypto
-aria2p
+flask
+gunicorn
+humanize
 google-api-python-client
-google-auth
-python-dotenv
+google-auth-httplib2
+google-auth-oauthlib
+parse-torrent-title

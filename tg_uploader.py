@@ -10,7 +10,6 @@ async def tg_prog(current, total, client, chat_id, message_id, start_time, filen
     pct = (current / total) * 100
     speed = current / (time.time() - start_time) if (time.time() - start_time) > 0 else 0
     
-    # Added Progress Bar here
     text = (
         f"📤 **TG Uploading:** `{filename}`\n"
         f"{get_prog_bar(pct)} {pct:.1f}%\n"

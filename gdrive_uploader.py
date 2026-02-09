@@ -1,32 +1,50 @@
-import os, time, asyncio, logging
+import os
+import logging
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.http import MediaFileUpload
-import config, utils
+import config
 
-def upload_to_gdrive(path, name, client, chat_id, msg_id, loop):
+logger = logging.getLogger(__name__)
+
+def get_drive_service():
+    # Build credentials from individual environment variables
+    creds = Credentials(
+        token=None,  # Will be refreshed
+        refresh_token=config.REFRESH_TOKEN,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=config.CLIENT_ID,
+        client_secret=config.CLIENT_SECRET,
+        scopes=['https://www.googleapis.com/auth/drive']
+    )
+    
+    # Refresh the token to get a valid access_token
     try:
-        creds = Credentials(
-            token=None, refresh_token=config.REFRESH_TOKEN,
-            token_uri="https://oauth2.googleapis.com/token",
-            client_id=config.CLIENT_ID, client_secret=config.CLIENT_SECRET,
-            scopes=['https://www.googleapis.com/auth/drive']
-        )
         creds.refresh(Request())
-        service = build('drive', 'v3', credentials=creds, cache_discovery=False)
+    except Exception as e:
+        raise Exception(f"OAuth Refresh Failed: {e}")
+
+    return build('drive', 'v3', credentials=creds, cache_discovery=False)
+
+def upload_to_gdrive(path, name):
+    try:
+        service = get_drive_service()
+        file_metadata = {'name': name, 'parents': [config.GDRIVE_FOLDER_ID]}
         media = MediaFileUpload(path, mimetype='application/octet-stream', resumable=True)
+        
         request = service.files().create(
-            body={'name': name, 'parents': [config.GDRIVE_FOLDER_ID]},
-            media_body=media, fields='id, webViewLink', supportsAllDrives=True
+            body=file_metadata,
+            media_body=media,
+            fields='id, webViewLink'
         )
-        response, last_up = None, 0
+
+        response = None
         while response is None:
             status, response = request.next_chunk()
-            if status and time.time() - last_up > 5:
-                pct = int(status.progress() * 100)
-                text = f"☁️ **Step 2/2: GDrive Uploading**\n📝 `{name}`\n{utils.get_prog_bar(pct)} `{pct}%`"
-                asyncio.run_coroutine_threadsafe(utils.edit_msg(client, chat_id, msg_id, text), loop)
-                last_up = time.time()
+        
         return response.get('webViewLink')
-    except Exception as e: return f"Error: {e}"
+
+    except Exception as e:
+        logger.error(f"GDrive Error: {str(e)}")
+        return f"Error: {str(e)}"

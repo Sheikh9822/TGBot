@@ -185,7 +185,7 @@ async def run_process(c, h_hash):
             
             text = (
                 f"📥 **Downloading:** `{final_name}`\n"
-                f"[{get_prog_bar(pct)}] {pct:.1f}%\n"
+                f"{get_prog_bar(pct)} {pct:.1f}%\n"
                 f"🚀 `{humanize.naturalsize(s.download_rate)}/s` | ⏳ ETA: {eta}\n"
                 f"👥 P: {s.num_peers} S: {s.num_seeds}"
             )

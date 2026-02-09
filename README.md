@@ -1,4 +1,3 @@
-# TGBot
-https://github.com/Sheikh9822/TGBot/commit/746fabf8b4e3e9816474384e7144276853087f57
+https://github.com/Sheikh9822/TGBot/commit/018b9972ea3168c4247d7b73735e1a8a3f328fff
 
-can upload to telegram botStorage
+working 

@@ -185,7 +185,7 @@ async def run_process(c, h_hash):
             
             text = (
                 f"📥 **Downloading:** `{final_name}`\n"
-                f"{get_prog_bar(pct)} {pct:.1f}%\n"
+                f"[{get_prog_bar(pct)}] {pct:.1f}%\n"
                 f"🚀 `{humanize.naturalsize(s.download_rate)}/s` | ⏳ ETA: {eta}\n"
                 f"👥 P: {s.num_peers} S: {s.num_seeds}"
             )
@@ -204,9 +204,9 @@ async def run_process(c, h_hash):
             await edit_msg(c, task["chat_id"], task["msg_id"], f"☁️ **Step 2/2:** Uploading to GDrive...")
             try:
                 loop = asyncio.get_event_loop()
-                # Added C, Task Chat ID and Message ID to the executor
-                glink = await loop.run_in_executor(None, upload_to_gdrive, path, final_name, c, task["chat_id"], task["msg_id"])
+                glink = await loop.run_in_executor(None, upload_to_gdrive, path, final_name)
                 
+                # SAFETY CHECK: Only create links if they are valid URLs
                 tg_out = f"[Telegram DB]({tg_link})" if tg_link.startswith("http") else f"TG Error: {tg_link}"
                 gd_out = f"[Google Drive]({glink})" if glink.startswith("http") else f"GDrive Error: {glink}"
 
@@ -237,11 +237,14 @@ if __name__ == "__main__":
     async def main():
         print("Bot starting...")
         await app.start()
+        
+        # Warm up Peer Cache
         try:
             await app.get_chat(config.DUMP_CHAT_ID)
             print(f"Dump Channel {config.DUMP_CHAT_ID} Resolved.")
         except:
             print("Warning: Could not resolve Dump Channel at startup.")
+            
         print("Bot is LIVE!")
         await asyncio.Event().wait()
     
@@ -249,6 +252,8 @@ if __name__ == "__main__":
         try:
             asyncio.get_event_loop().run_until_complete(main())
         except FloodWait as e:
+            print(f"FloodWait hit! Sleeping {e.value}s")
             time.sleep(e.value + 5)
         except Exception as e:
+            print(f"Bot Crash: {e}")
             time.sleep(10)

@@ -1,5 +1,9 @@
 FROM python:3.11-slim-bookworm
-RUN apt-get update && apt-get install -y python3-libtorrent && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y \
+    python3-libtorrent \
+    ffmpeg \
+    mediainfo \
+    && rm -rf /var/lib/apt/lists/*
 ENV PYTHONPATH="/usr/lib/python3/dist-packages"
 ENV PYTHONUNBUFFERED=1
 WORKDIR /app

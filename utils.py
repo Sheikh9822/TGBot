@@ -11,7 +11,8 @@ def get_eta(rem, speed):
 
 def get_prog_bar(pct):
     p = int(pct / 10)
-    return "█" * p + "░" * (10 - p)
+    # Modified to use the requested style
+    return "▰" * p + "▱" * (10 - p)
 
 def clean_rename(original_name):
     parsed = PTN.parse(original_name)
